@@ -11,7 +11,7 @@ import numpy as np
 
 from databroker.assets.handlers import Xspress3HDF5Handler
 
-from event_model import compose_resource
+from event_model import compose_resource, compose_stream_resource
 
 from ophyd import Component as Cpt, Device, Kind
 from ophyd import EpicsSignal, EpicsSignalRO, Signal
@@ -28,6 +28,8 @@ from ..detectors.utils import makedirs
 
 logger = logging.getLogger(__name__)
 
+ASSET_DOCS_MODE_LEGACY = "legacy"
+ASSET_DOCS_MODE_STREAM = "stream"
 
 class Xspress3Trigger(Device):
     """
@@ -135,24 +137,43 @@ class Xspress3ExternalFileReference(Signal):
         number of bins in the array data, default is 4096
     dim_name: str
         name for the first dimension of the array data, default is "bin_count"
+    shape: Sequence[int], optional
+        shape of one data value, default is ``(bin_count,)``
+    dims: Sequence[str], optional
+        names for the dimensions in ``shape``, default is ``(dim_name,)``
 
+    external: str
+        external asset protocol prefix, for example "FILESTORE:" or "STREAM:"
     """
 
-    def __init__(self, *args, dtype_str="<u4", bin_count=4096, dim_name="bin_count", **kwargs):
+    def __init__(
+        self,
+        *args,
+        dtype_str="<u4",
+        bin_count=4096,
+        dim_name="bin_count",
+        shape=None,
+        dims=None,
+        external="FILESTORE:",
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
+        self.external = external
         self.dtype_str = np.dtype(dtype_str).str
-        self.shape = (bin_count,)
-        self.dims = (dim_name,)
+        self.shape = (bin_count,) if shape is None else tuple(shape)
+        self.dims = (dim_name,) if dims is None else tuple(dims)
 
     def describe(self):
+        # Tiled stream nodes add a leading sequence dimension to the per-row shape.
+        dims = ("time", *self.dims) if self.external == "STREAM:" else self.dims
         res = super().describe()
         res[self.name].update(
             dict(
-                external="FILESTORE:",
+                external=self.external,
                 dtype="array",
                 dtype_str=self.dtype_str,
                 shape=self.shape,
-                dims=self.dims,
+                dims=dims,
             )
         )
         return res
@@ -169,6 +190,7 @@ class Xspress3HDF5Plugin(HDF5Plugin):
         path_template,
         resource_kwargs=None,
         spec=Xspress3HDF5Handler.HANDLER_NAME,
+        asset_docs_mode=ASSET_DOCS_MODE_LEGACY,
         **kwargs,
     ):
         """
@@ -188,12 +210,21 @@ class Xspress3HDF5Plugin(HDF5Plugin):
         spec:
             data handler name for resource documents,
             Xspress3HDF5Handler.HANDLER_NAME by default
+        asset_docs_mode: {"legacy", "stream"}
+            asset document schema to emit, default is ``"legacy"``
         kwargs:
             passed to the parent class
         """
         super().__init__(*args, **kwargs)
+        if asset_docs_mode not in {ASSET_DOCS_MODE_LEGACY, ASSET_DOCS_MODE_STREAM}:
+            raise ValueError(
+                "asset_docs_mode must be 'legacy' or 'stream', "
+                f"not {asset_docs_mode!r}"
+            )
+        self.asset_docs_mode = asset_docs_mode
         self._resource = None
         self._datum_factory = None
+        self._stream_datum_composers = {}
 
         # TODO: be certain this handler is widely available
         self.bulk_data_spec = "XSP3_FLY"
@@ -258,7 +289,44 @@ class Xspress3HDF5Plugin(HDF5Plugin):
         the_full_data_dir_path = Path(root_path) / Path(the_data_dir_path)
         return str(the_full_data_dir_path)
 
+    def _configure_asset_document_mode(self):
+        external = (
+            "STREAM:"
+            if self.asset_docs_mode == ASSET_DOCS_MODE_STREAM
+            else "FILESTORE:"
+        )
+        parent_reference = self.parent.get_external_file_ref()
+        channels = tuple(self.parent.iterate_channels())
+        references = [parent_reference] + [
+            channel.get_external_file_ref() for channel in channels
+        ]
+        for reference in references:
+            if reference is not None:
+                reference.external = external
+        return parent_reference, channels
+
+    def _compose_stream_resource(
+        self, *, full_file_path, reference, channel_number=None
+    ):
+        parameters = {
+            **self.resource_kwargs,
+            "dataset": "/entry/instrument/detector/data",
+            "chunk_shape": (1, *reference.shape),
+            "join_method": "stack",
+            "spec": self.spec,
+        }
+        parameters.pop("slice", None)
+        if channel_number is not None:
+            parameters["slice"] = f":,{channel_number - 1},:"
+        return compose_stream_resource(
+            mimetype="application/x-hdf5",
+            uri=full_file_path.absolute().as_uri(),
+            data_key=reference.name,
+            parameters=parameters,
+        )
+
     def stage(self):
+        parent_reference, channels = self._configure_asset_document_mode()
         logger.debug("staging '%s' of '%s'", self.name, self.parent.name)
         staged_devices = super().stage()
 
@@ -296,34 +364,63 @@ class Xspress3HDF5Plugin(HDF5Plugin):
         resource_path = full_file_path.relative_to(self.root_path.get())
 
         self._asset_docs_cache = deque()
+        self._resource = None
+        self._datum_factory = None
+        self._stream_datum_composers = {}
+        self._bulk_data_resource = None
+        self._bulk_data_datum_factory = None
 
-        self._bulk_data_resource, self._bulk_data_datum_factory, _ = compose_resource(
-            # a UID is _required_ here, so we provide a fake and then remove it from
-            #   the resource document; later a RunEngine will provide a real id
-            start={"uid": "to be replaced"},
-            spec=self.bulk_data_spec,
-            root=self.root_path.get(),
-            resource_path=str(resource_path),
-            resource_kwargs=self.bulk_data_resource_kwargs,
+        normal_channels = tuple(
+            channel
+            for channel in channels
+            if channel.get_external_file_ref() is not None
+            and channel.get_external_file_ref().kind & Kind.normal
         )
-        # remove the fake id specified above from the resource document; later
-        #   a RunEngine will provide a real one
-        self._bulk_data_resource.pop("run_start")
-        self._asset_docs_cache.append(("resource", self._bulk_data_resource))
 
-        self._resource, self._datum_factory, _ = compose_resource(
-            # a UID is _required_ here, so we provide a fake and then remove it from
-            #   the resource document; later a RunEngine will provide a real id
-            start={"uid": "to be replaced"},
-            spec=self.spec,
-            root=self.root_path.get(),
-            resource_path=str(resource_path),
-            resource_kwargs=self.resource_kwargs,
-        )
-        # remove the fake id specified above from the resource document; later
-        #   a RunEngine will provide a real one
-        self._resource.pop("run_start")
-        self._asset_docs_cache.append(("resource", self._resource))
+        if self.asset_docs_mode == ASSET_DOCS_MODE_LEGACY:
+            if parent_reference is not None and parent_reference.kind & Kind.normal:
+                self._bulk_data_resource, self._bulk_data_datum_factory, _ = compose_resource(
+                    # a UID is _required_ here, so we provide a fake and then remove it from
+                    #   the resource document; later a RunEngine will provide a real id
+                    start={"uid": "to be replaced"},
+                    spec=self.bulk_data_spec,
+                    root=self.root_path.get(),
+                    resource_path=str(resource_path),
+                    resource_kwargs=self.bulk_data_resource_kwargs,
+                )
+                self._bulk_data_resource.pop("run_start")
+                self._asset_docs_cache.append(("resource", self._bulk_data_resource))
+
+            if normal_channels:
+                self._resource, self._datum_factory, _ = compose_resource(
+                    # a UID is _required_ here, so we provide a fake and then remove it from
+                    #   the resource document; later a RunEngine will provide a real id
+                    start={"uid": "to be replaced"},
+                    spec=self.spec,
+                    root=self.root_path.get(),
+                    resource_path=str(resource_path),
+                    resource_kwargs=self.resource_kwargs,
+                )
+                self._resource.pop("run_start")
+                self._asset_docs_cache.append(("resource", self._resource))
+        else:
+            if parent_reference is not None and parent_reference.kind & Kind.normal:
+                stream_resource, stream_datum_composer = self._compose_stream_resource(
+                    full_file_path=full_file_path,
+                    reference=parent_reference,
+                )
+                self._stream_datum_composers[parent_reference.name] = stream_datum_composer
+                self._asset_docs_cache.append(("stream_resource", stream_resource))
+
+            for channel in normal_channels:
+                channel_reference = channel.get_external_file_ref()
+                stream_resource, stream_datum_composer = self._compose_stream_resource(
+                    full_file_path=full_file_path,
+                    reference=channel_reference,
+                    channel_number=channel.channel_number,
+                )
+                self._stream_datum_composers[channel_reference.name] = stream_datum_composer
+                self._asset_docs_cache.append(("stream_resource", stream_resource))
 
         # this should be the last thing we do here
         self.capture.set(1).wait()
@@ -340,25 +437,49 @@ class Xspress3HDF5Plugin(HDF5Plugin):
         if key is not None:
             raise ValueError(f"'key' must be None but key='{key}'")
 
-        # generate datum document for "bulk" image data (the whole array)
-        if self.parent.get_external_file_ref() and self.parent.get_external_file_ref().kind & Kind.normal:
-            bulk_data_datum = self._bulk_data_datum_factory(
-                datum_kwargs={}
-            )
-            self._asset_docs_cache.append(("datum", bulk_data_datum))
-            self.parent.get_external_file_ref().put(bulk_data_datum["datum_id"])
+        try:
+            frame = datum_kwargs["frame"]
+        except KeyError as exc:
+            raise ValueError(
+                "'frame' is required in datum_kwargs for Xspress3 stream data"
+            ) from exc
 
-        # generate datum documents for all channels of Kind.normal
-        for channel in self.parent.iterate_channels():
-            if channel.get_external_file_ref().kind & Kind.normal:
-                datum = self._datum_factory(
-                    datum_kwargs={
-                        **datum_kwargs,
-                        "channel": channel.channel_number,
-                    }
+        parent_reference = self.parent.get_external_file_ref()
+        channels = tuple(self.parent.iterate_channels())
+
+        if self.asset_docs_mode == ASSET_DOCS_MODE_LEGACY:
+            if parent_reference is not None and parent_reference.kind & Kind.normal:
+                bulk_data_datum = self._bulk_data_datum_factory(datum_kwargs={})
+                self._asset_docs_cache.append(("datum", bulk_data_datum))
+                parent_reference.put(bulk_data_datum["datum_id"])
+
+            for channel in channels:
+                channel_reference = channel.get_external_file_ref()
+                if channel_reference is not None and channel_reference.kind & Kind.normal:
+                    datum = self._datum_factory(
+                        datum_kwargs={
+                            **datum_kwargs,
+                            "channel": channel.channel_number,
+                        }
+                    )
+                    self._asset_docs_cache.append(("datum", datum))
+                    channel_reference.put(datum["datum_id"])
+        else:
+            if parent_reference is not None and parent_reference.kind & Kind.normal:
+                stream_datum = self._stream_datum_composers[parent_reference.name](
+                    indices={"start": frame, "stop": frame + 1}
                 )
-                self._asset_docs_cache.append(("datum", datum))
-                channel.get_external_file_ref().put(datum["datum_id"])
+                self._asset_docs_cache.append(("stream_datum", stream_datum))
+                parent_reference.put(stream_datum["uid"])
+
+            for channel in channels:
+                channel_reference = channel.get_external_file_ref()
+                if channel_reference is not None and channel_reference.kind & Kind.normal:
+                    stream_datum = self._stream_datum_composers[channel_reference.name](
+                        indices={"start": frame, "stop": frame + 1}
+                    )
+                    self._asset_docs_cache.append(("stream_datum", stream_datum))
+                    channel_reference.put(stream_datum["uid"])
 
     def collect_asset_docs(self):
         items = list(self._asset_docs_cache)
@@ -1185,7 +1306,10 @@ def build_xspress3_class(
     # Xspress3ExternalFileReference is optional
     if image_data_key:
         xspress3_fields_and_methods[image_data_key] = Cpt(
-            Xspress3ExternalFileReference, kind=Kind.normal
+            Xspress3ExternalFileReference,
+            kind=Kind.normal,
+            shape=(len(channel_numbers), 4096),
+            dims=("channel", "bin_count"),
         )
 
     xspress3_fields_and_methods.update(
