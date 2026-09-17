@@ -1,6 +1,8 @@
 import copy
 from collections import Counter
+from contextlib import ExitStack
 from pathlib import Path
+from unittest.mock import Mock, patch
 from urllib.parse import unquote, urlparse
 
 import h5py
@@ -62,21 +64,6 @@ def tiled_client(tmp_path):
 class _SimulatedPluginMixin:
     def stage(self):
         self.stage_sigs[self.file_template] = "%s/%s_%6.6d.h5"
-        signals = {getattr(self, signal) if isinstance(signal, str) else signal for signal in self.stage_sigs}
-        signals.update(
-            getattr(self, signal)
-            for signal in ("array_counter", "file_path", "file_name", "file_number", "capture")
-        )
-        # Fake EPICS stage signals have no IOC readback to complete their normal set().
-        for signal in signals:
-            if hasattr(signal, "sim_put"):
-
-                def set_signal(value, *args, signal=signal, **kwargs):
-                    signal.sim_put(value)
-                    return NullStatus()
-
-                signal.set = set_signal
-
         staged_devices = super().stage()
 
         resource = getattr(self, "_resource", None)
@@ -96,6 +83,35 @@ class _SimulatedPluginMixin:
             file.create_dataset(DATASET_PATH, data=EXPECTED_DATA, chunks=(1, 2, 4096))
 
         return staged_devices
+
+
+def _mock_signal_set(signal):
+    def set_value(value, *args, **kwargs):
+        signal.sim_put(value)
+        return NullStatus()
+
+    signal.set = Mock(side_effect=set_value)
+
+
+def _mock_plugin_signals(plugin):
+    signals = {getattr(plugin, signal) if isinstance(signal, str) else signal for signal in plugin.stage_sigs}
+    signals.update(
+        getattr(plugin, signal) for signal in ("array_counter", "file_path", "file_name", "file_number", "capture")
+    )
+    for signal in signals:
+        if hasattr(signal, "sim_put"):
+            _mock_signal_set(signal)
+
+
+def _mock_acquisition_completion(detector):
+    production_trigger = detector.trigger
+
+    def trigger():
+        status = production_trigger()
+        detector.cam.acquire.put(0)
+        return status
+
+    detector.trigger = Mock(side_effect=trigger)
 
 
 class SimulatedXspress3HDF5Plugin(_SimulatedPluginMixin, Xspress3HDF5Plugin):
@@ -124,9 +140,14 @@ def _build_fake_detector(asset_dir, plugin_class):
         },
     )
     fake_detector_class = make_fake_device(detector_class)
-    fake_detector_class.channel01.cls.__init__ = ADBase.__init__
-    fake_detector_class.channel02.cls.__init__ = ADBase.__init__
-    detector = fake_detector_class(prefix="Xsp3:", name="det")
+    with ExitStack() as stack:
+        for channel_name in ("channel01", "channel02"):
+            channel_class = getattr(fake_detector_class, channel_name).cls
+            stack.enter_context(patch.object(channel_class, "__init__", ADBase.__init__))
+        detector = fake_detector_class(prefix="Xsp3:", name="det")
+
+    _mock_plugin_signals(detector.hdf5plugin)
+    _mock_acquisition_completion(detector)
     detector.hdf5plugin.array_size.depth.sim_put(1)
     detector.hdf5plugin.array_size.height.sim_put(1)
     detector.hdf5plugin.array_size.width.sim_put(1)
@@ -139,15 +160,6 @@ def test_xspress3_channel_stream_shapes(RE, tiled_client):
     detector = _build_fake_detector(asset_dir, SimulatedXspress3HDF5StreamPlugin)
     detector.read_attrs = ["image", "channel01.image", "channel02.image"]
     detector.image.kind = Kind.normal
-
-    production_trigger = detector.trigger
-
-    def trigger_and_finish():
-        status = production_trigger()
-        detector.cam.acquire.put(0)
-        return status
-
-    detector.trigger = trigger_and_finish
     parent_key = detector.image.name
     channel_keys = [detector.channel01.image.name, detector.channel02.image.name]
     data_keys = [parent_key, *channel_keys]
