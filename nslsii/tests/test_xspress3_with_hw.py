@@ -16,6 +16,7 @@ from nslsii.areadetector.xspress3 import (
     Xspress3HDF5Plugin,
     build_xspress3_class,
 )
+from nslsii.areadetector.xspress3_stream import Xspress3HDF5StreamPlugin
 
 
 # in the presence of spoof-beamline ...
@@ -43,7 +44,6 @@ def test_hdf5plugin(xs3_pv_prefix):
                 root_path="/a/b/c",
                 path_template="/a/b/c/%Y/%m/%d",
                 resource_kwargs={},
-                asset_docs_mode="legacy",
             )
         },
     )
@@ -213,13 +213,12 @@ def test_document_stream(
         xspress3_parent_classes=(Xspress3Detector, Xspress3Trigger),
         extra_class_members={
             "hdf5plugin": Component(
-                Xspress3HDF5Plugin,
+                Xspress3HDF5StreamPlugin,
                 "HDF1:",
                 name="h5p",
                 root_path=xs3_root_path,
                 path_template=xs3_path_template,
                 resource_kwargs={},
-                asset_docs_mode="stream",
             )
         },
     )

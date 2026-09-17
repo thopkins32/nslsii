@@ -4,6 +4,7 @@ import pytest
 from ophyd.sim import make_fake_device
 
 from nslsii.areadetector.xspress3 import Xspress3HDF5Plugin
+from nslsii.areadetector.xspress3_stream import Xspress3HDF5StreamPlugin
 
 
 def test__build_data_dir_path():
@@ -35,7 +36,7 @@ def test_default_spec():
 
 
 def test_generate_datum_requires_frame():
-    hdf5 = make_fake_device(Xspress3HDF5Plugin)(
+    hdf5 = make_fake_device(Xspress3HDF5StreamPlugin)(
         name="hdf5",
         root_path="",
         path_template="",

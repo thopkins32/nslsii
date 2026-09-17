@@ -26,6 +26,7 @@ from nslsii.areadetector.xspress3 import (
     Xspress3Trigger,
     build_xspress3_class,
 )
+from nslsii.areadetector.xspress3_stream import Xspress3HDF5StreamPlugin
 
 
 EXPECTED_DATA = np.arange(2 * 2 * 4096, dtype=np.uint32).reshape(2, 2, 4096)
@@ -58,7 +59,7 @@ def tiled_client(tmp_path):
         context.close()
 
 
-class SimulatedXspress3HDF5Plugin(Xspress3HDF5Plugin):
+class _SimulatedPluginMixin:
     def stage(self):
         self.stage_sigs[self.file_template] = "%s/%s_%6.6d.h5"
         signals = {getattr(self, signal) if isinstance(signal, str) else signal for signal in self.stage_sigs}
@@ -97,7 +98,15 @@ class SimulatedXspress3HDF5Plugin(Xspress3HDF5Plugin):
         return staged_devices
 
 
-def _build_fake_detector(asset_dir, asset_docs_mode):
+class SimulatedXspress3HDF5Plugin(_SimulatedPluginMixin, Xspress3HDF5Plugin):
+    pass
+
+
+class SimulatedXspress3HDF5StreamPlugin(_SimulatedPluginMixin, Xspress3HDF5StreamPlugin):
+    pass
+
+
+def _build_fake_detector(asset_dir, plugin_class):
     detector_class = build_xspress3_class(
         channel_numbers=(1, 2),
         mcaroi_numbers=(),
@@ -105,13 +114,12 @@ def _build_fake_detector(asset_dir, asset_docs_mode):
         xspress3_parent_classes=(Xspress3Detector, Xspress3Trigger),
         extra_class_members={
             "hdf5plugin": Component(
-                SimulatedXspress3HDF5Plugin,
+                plugin_class,
                 "HDF1:",
                 name="h5p",
                 root_path=str(asset_dir),
                 path_template=str(asset_dir),
                 resource_kwargs={},
-                asset_docs_mode=asset_docs_mode,
             )
         },
     )
@@ -128,7 +136,7 @@ def _build_fake_detector(asset_dir, asset_docs_mode):
 
 def test_xspress3_channel_stream_shapes(RE, tiled_client):
     client, asset_dir = tiled_client
-    detector = _build_fake_detector(asset_dir, "stream")
+    detector = _build_fake_detector(asset_dir, SimulatedXspress3HDF5StreamPlugin)
     detector.read_attrs = ["image", "channel01.image", "channel02.image"]
     detector.image.kind = Kind.normal
 
@@ -144,20 +152,10 @@ def test_xspress3_channel_stream_shapes(RE, tiled_client):
     channel_keys = [detector.channel01.image.name, detector.channel02.image.name]
     data_keys = [parent_key, *channel_keys]
 
-    def remove_native_stream_refs(document):
-        document = copy.deepcopy(document)
-        for data_key in data_keys:
-            document["data"].pop(data_key, None)
-            document["timestamps"].pop(data_key, None)
-            document.get("filled", {}).pop(data_key, None)
-        return document
-
     documents = []
     subscription = RE.subscribe(lambda name, document: documents.append((name, document)))
     try:
-        # Native StreamDatums are already emitted; avoid 2.0.11 legacy Datum conversion.
-        # The raw Event documents remain captured above for contract assertions.
-        writer = TiledWriter(client, patches={"event": remove_native_stream_refs}, validate=False)
+        writer = TiledWriter(client, validate=False)
         RE(plans.count([detector], 2), writer)
     finally:
         RE.unsubscribe(subscription)
@@ -218,7 +216,7 @@ def test_xspress3_channel_stream_shapes(RE, tiled_client):
 def test_xspress3_legacy_asset_shapes(tmp_path):
     asset_dir = tmp_path / "assets"
     asset_dir.mkdir()
-    detector = _build_fake_detector(asset_dir, "legacy")
+    detector = _build_fake_detector(asset_dir, SimulatedXspress3HDF5Plugin)
     detector.image.kind = Kind.normal
     detector.hdf5plugin.stage()
     try:
@@ -253,7 +251,7 @@ def test_xspress3_legacy_asset_shapes(tmp_path):
                 )
 
         assert detector.image.describe()[detector.image.name]["external"] == "FILESTORE:"
-        assert detector.image.describe()[detector.image.name]["shape"] == (2, 4096)
+        assert detector.image.describe()[detector.image.name]["shape"] == (4096,)
         for channel in detector.iterate_channels():
             reference = channel.get_external_file_ref()
             assert reference.describe()[reference.name]["shape"] == (4096,)
