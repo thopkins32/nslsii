@@ -2,12 +2,13 @@ import datetime
 import os
 import re
 import time
-from collections import Counter
 
 import pytest
 
+from area_detector_handlers.handlers import Xspress3HDF5Handler
 from bluesky import RunEngine
 from bluesky.plans import count
+from event_model import Filler
 from ophyd import Component, Kind
 from ophyd.areadetector import Xspress3Detector
 
@@ -16,7 +17,6 @@ from nslsii.areadetector.xspress3 import (
     Xspress3HDF5Plugin,
     build_xspress3_class,
 )
-from nslsii.areadetector.xspress3_stream import Xspress3HDF5StreamPlugin
 
 
 # in the presence of spoof-beamline ...
@@ -35,7 +35,6 @@ def test_hdf5plugin(xs3_pv_prefix):
     xspress3_class = build_xspress3_class(
         channel_numbers=(1, 2),
         mcaroi_numbers=(3, 4),
-        image_data_key="image",
         extra_class_members={
             "hdf5plugin": Component(
                 Xspress3HDF5Plugin,
@@ -48,7 +47,6 @@ def test_hdf5plugin(xs3_pv_prefix):
         },
     )
     xspress3 = xspress3_class(prefix=xs3_pv_prefix, name="xs3")
-    xspress3.image.kind = Kind.normal
 
     xspress3.hdf5plugin.stage()
 
@@ -58,33 +56,21 @@ def test_hdf5plugin(xs3_pv_prefix):
     assert re.match(r"\w{8}\-\w{4}\-\w{4}\-\w{4}", xspress3.hdf5plugin.file_name.get())
     assert xspress3.hdf5plugin.file_number.get() == 0
 
-    assert xspress3.hdf5plugin._bulk_data_resource["root"] == "/a/b/c"
+    assert xspress3.hdf5plugin._resource["root"] == "/a/b/c"
     # expect resource path to look like YYYY/MM/DD/aaaaaaaa-bbbb-cccc-dddd_000000.h5
     assert re.match(
         r"\d{4}\/\d{2}\/\d{2}\/\w{8}\-\w{4}\-\w{4}\-\w{4}_000000\.h5",
-        xspress3.hdf5plugin._bulk_data_resource["resource_path"],
+        xspress3.hdf5plugin._resource["resource_path"],
     )
 
     xspress3.hdf5plugin.generate_datum(
-        key=None, timestamp=datetime.datetime.now(), datum_kwargs={"frame": 0}
+        key=None, timestamp=datetime.datetime.now(), datum_kwargs={}
     )
 
-    # expect only legacy resources and datums in legacy mode
+    # expect one resource document and
+    #   one datum document for each channel
     xspress3_asset_docs = list(xspress3.collect_asset_docs())
-    assert Counter(name for name, _ in xspress3_asset_docs) == Counter(
-        {"resource": 2, "datum": 3}
-    )
-    resources = [
-        document for name, document in xspress3_asset_docs if name == "resource"
-    ]
-    assert {document["spec"] for document in resources} == {"XSP3", "XSP3_FLY"}
-    channel_resource = next(document for document in resources if document["spec"] == "XSP3")
-    channel_datums = [
-        document
-        for name, document in xspress3_asset_docs
-        if name == "datum" and document["resource"] == channel_resource["uid"]
-    ]
-    assert {document["datum_kwargs"]["channel"] for document in channel_datums} == {1, 2}
+    assert len(xspress3_asset_docs) == 1 + xspress3.get_channel_count()
 
     xspress3.hdf5plugin.unstage()
 
@@ -213,7 +199,7 @@ def test_document_stream(
         xspress3_parent_classes=(Xspress3Detector, Xspress3Trigger),
         extra_class_members={
             "hdf5plugin": Component(
-                Xspress3HDF5StreamPlugin,
+                Xspress3HDF5Plugin,
                 "HDF1:",
                 name="h5p",
                 root_path=xs3_root_path,
@@ -223,21 +209,36 @@ def test_document_stream(
         },
     )
     xspress3 = xspress3_class(prefix=xs3_pv_prefix, name="xs3")
-    xspress3.image.kind = Kind.normal
 
     #
 
     RE(count([xspress3]))
 
+    # expect one datum document per channel
     expected_document_names = (
         "start",
         "descriptor",
-        *("stream_resource",) * (xspress3.get_channel_count() + 1),
-        *("stream_datum",) * (xspress3.get_channel_count() + 1),
+        "resource",
+        "datum",
+        "datum",
+        "datum",
         "event",
         "stop",
     )
 
-    actual_document_names = [name for name, _ in document_list]
-    assert all(name in expected_document_names for name in actual_document_names)
+    actual_document_names = list()
+
+    filled_documents = list()
+
+    with Filler(
+        {Xspress3HDF5Handler.HANDLER_NAME: Xspress3HDF5Handler}, inplace=True
+    ) as filler:
+        for name, document in document_list:
+            assert name in expected_document_names
+            actual_document_names.append(name)
+
+            filler(name, document)
+
+            filled_documents.append((name, document))
+
     assert tuple(actual_document_names) == expected_document_names

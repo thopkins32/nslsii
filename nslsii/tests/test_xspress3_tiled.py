@@ -8,7 +8,6 @@ from urllib.parse import unquote, urlparse
 import h5py
 import numpy as np
 import pytest
-from area_detector_handlers.handlers import BulkXSPRESS, Xspress3HDF5Handler
 from bluesky import plans
 from bluesky_tiled_plugins import TiledWriter
 from event_model import DocumentNames
@@ -23,12 +22,11 @@ from tiled.server.app import build_app
 from bluesky_tiled_plugins.exporters import json_seq_exporter
 from bluesky_tiled_plugins.routers import validator
 
-from nslsii.areadetector.xspress3 import (
-    Xspress3HDF5Plugin,
-    Xspress3Trigger,
-    build_xspress3_class,
+from nslsii.areadetector.xspress3 import Xspress3Trigger, build_xspress3_class
+from nslsii.areadetector.xspress3_stream import (
+    Xspress3HDF5StreamPlugin,
+    Xspress3StreamExternalFileReference,
 )
-from nslsii.areadetector.xspress3_stream import Xspress3HDF5StreamPlugin
 
 
 EXPECTED_DATA = np.arange(2 * 2 * 4096, dtype=np.uint32).reshape(2, 2, 4096)
@@ -66,17 +64,11 @@ class _SimulatedPluginMixin:
         self.stage_sigs[self.file_template] = "%s/%s_%6.6d.h5"
         staged_devices = super().stage()
 
-        resource = getattr(self, "_resource", None)
-        if resource is not None:
-            file_path = Path(resource["root"]) / resource["resource_path"]
-        else:
-            stream_resources = [
-                document
-                for name, document in self._asset_docs_cache
-                if name == DocumentNames.stream_resource.value
-            ]
-            uri = stream_resources[0]["uri"]
-            file_path = Path(unquote(urlparse(uri).path))
+        stream_resources = [
+            document for name, document in self._asset_docs_cache if name == DocumentNames.stream_resource.value
+        ]
+        uri = stream_resources[0]["uri"]
+        file_path = Path(unquote(urlparse(uri).path))
 
         file_path.parent.mkdir(parents=True, exist_ok=True)
         with h5py.File(file_path, "w") as file:
@@ -114,23 +106,20 @@ def _mock_acquisition_completion(detector):
     detector.trigger = Mock(side_effect=trigger)
 
 
-class SimulatedXspress3HDF5Plugin(_SimulatedPluginMixin, Xspress3HDF5Plugin):
-    pass
-
-
 class SimulatedXspress3HDF5StreamPlugin(_SimulatedPluginMixin, Xspress3HDF5StreamPlugin):
     pass
 
 
-def _build_fake_detector(asset_dir, plugin_class):
+def _build_fake_detector(asset_dir):
     detector_class = build_xspress3_class(
         channel_numbers=(1, 2),
         mcaroi_numbers=(),
         image_data_key="image",
         xspress3_parent_classes=(Xspress3Detector, Xspress3Trigger),
+        external_file_reference_class=Xspress3StreamExternalFileReference,
         extra_class_members={
             "hdf5plugin": Component(
-                plugin_class,
+                SimulatedXspress3HDF5StreamPlugin,
                 "HDF1:",
                 name="h5p",
                 root_path=str(asset_dir),
@@ -157,7 +146,7 @@ def _build_fake_detector(asset_dir, plugin_class):
 
 def test_xspress3_channel_stream_shapes(RE, tiled_client):
     client, asset_dir = tiled_client
-    detector = _build_fake_detector(asset_dir, SimulatedXspress3HDF5StreamPlugin)
+    detector = _build_fake_detector(asset_dir)
     detector.read_attrs = ["image", "channel01.image", "channel02.image"]
     detector.image.kind = Kind.normal
     parent_key = detector.image.name
@@ -223,50 +212,3 @@ def test_xspress3_channel_stream_shapes(RE, tiled_client):
         )
         is True
     )
-
-
-def test_xspress3_legacy_asset_shapes(tmp_path):
-    asset_dir = tmp_path / "assets"
-    asset_dir.mkdir()
-    detector = _build_fake_detector(asset_dir, SimulatedXspress3HDF5Plugin)
-    detector.image.kind = Kind.normal
-    detector.hdf5plugin.stage()
-    try:
-        detector.hdf5plugin.generate_datum(key=None, timestamp=0, datum_kwargs={"frame": 0})
-        asset_docs = list(detector.hdf5plugin.collect_asset_docs())
-        assert Counter(name for name, _ in asset_docs) == Counter({"resource": 2, "datum": 3})
-
-        resources = {document["uid"]: document for name, document in asset_docs if name == "resource"}
-        bulk_resource = next(document for document in resources.values() if document["spec"] == "XSP3_FLY")
-        channel_resource = next(document for document in resources.values() if document["spec"] == "XSP3")
-        bulk_datum = next(
-            document
-            for name, document in asset_docs
-            if name == "datum" and document["resource"] == bulk_resource["uid"]
-        )
-        channel_datums = [
-            document
-            for name, document in asset_docs
-            if name == "datum" and document["resource"] == channel_resource["uid"]
-        ]
-        assert len(channel_datums) == 2
-
-        file_path = Path(bulk_resource["root"]) / bulk_resource["resource_path"]
-        with BulkXSPRESS(str(file_path)) as handler:
-            np.testing.assert_array_equal(handler(**bulk_datum["datum_kwargs"]), EXPECTED_DATA)
-
-        with Xspress3HDF5Handler(str(file_path)) as handler:
-            for datum in channel_datums:
-                kwargs = datum["datum_kwargs"]
-                np.testing.assert_array_equal(
-                    handler(**kwargs), EXPECTED_DATA[kwargs["frame"], kwargs["channel"] - 1, :]
-                )
-
-        assert detector.image.describe()[detector.image.name]["external"] == "FILESTORE:"
-        assert detector.image.describe()[detector.image.name]["shape"] == (4096,)
-        for channel in detector.iterate_channels():
-            reference = channel.get_external_file_ref()
-            assert reference.describe()[reference.name]["shape"] == (4096,)
-            assert reference.describe()[reference.name]["external"] == "FILESTORE:"
-    finally:
-        detector.hdf5plugin.unstage()

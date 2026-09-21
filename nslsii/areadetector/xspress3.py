@@ -827,7 +827,11 @@ def _validate_mcaroi_number(mcaroi_number):
 
 
 def build_channel_class(
-    channel_number, mcaroi_numbers, image_data_key=None, channel_parent_classes=None
+    channel_number,
+    mcaroi_numbers,
+    image_data_key=None,
+    channel_parent_classes=None,
+    external_file_reference_class=Xspress3ExternalFileReference,
 ):
     """Build an Xspress3 channel class with the specified channel number and MCAROI numbers.
 
@@ -850,6 +854,10 @@ def build_channel_class(
     channel_parent_classes: list-like, optional
         sequence of all parent classes for the generated channel class,
         by default the only parent is ophyd.areadetector.ADBase
+    external_file_reference_class: type, optional
+        the ``Xspress3ExternalFileReference``-compatible class used for the
+        channel's ``image_data_key`` component, default is
+        ``Xspress3ExternalFileReference``
 
     Returns
     -------
@@ -958,7 +966,7 @@ def build_channel_class(
     # Xspress3ExternalFileReference is optional
     if image_data_key:
         channel_fields_and_methods[image_data_key] = Cpt(
-            Xspress3ExternalFileReference, kind=Kind.normal
+            external_file_reference_class, kind=Kind.normal
         )
 
     channel_fields_and_methods.update(
@@ -1018,6 +1026,7 @@ def build_xspress3_class(
     channel_parent_classes=None,
     xspress3_parent_classes=None,
     extra_class_members=None,
+    external_file_reference_class=Xspress3ExternalFileReference,
 ):
     """Build an Xspress3 detector class with the specified channel and roi numbers.
 
@@ -1051,6 +1060,11 @@ def build_xspress3_class(
         the default parent is ophyd.areadetector.Xspress3Detector
     extra_class_members: Dict[String, Any]
         a dictionary of extra class members to be passed to the builtin type(...)
+    external_file_reference_class: type, optional
+        the ``Xspress3ExternalFileReference``-compatible class used for the
+        detector's ``image_data_key`` component and every channel's
+        ``image_data_key`` component, default is
+        ``Xspress3ExternalFileReference``
         function; see the builtin type function for allowed key-value pairs
 
     Returns
@@ -1185,7 +1199,7 @@ def build_xspress3_class(
     # Xspress3ExternalFileReference is optional
     if image_data_key:
         xspress3_fields_and_methods[image_data_key] = Cpt(
-            Xspress3ExternalFileReference, kind=Kind.normal
+            external_file_reference_class, kind=Kind.normal
         )
 
     xspress3_fields_and_methods.update(
@@ -1196,6 +1210,7 @@ def build_xspress3_class(
                     mcaroi_numbers=mcaroi_numbers,
                     image_data_key=image_data_key,
                     channel_parent_classes=channel_parent_classes,
+                    external_file_reference_class=external_file_reference_class,
                 ),
                 # there is no discrete channel prefix
                 # for the Xspress3 IOC PVs

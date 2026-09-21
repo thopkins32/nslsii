@@ -9,8 +9,30 @@ from event_model import compose_stream_resource
 from ophyd import Component as Cpt, Kind, Signal
 from ophyd.areadetector.plugins import HDF5Plugin_V34 as HDF5Plugin
 
+from .xspress3 import Xspress3ExternalFileReference
+
 
 logger = logging.getLogger(__name__)
+
+
+class Xspress3StreamExternalFileReference(Xspress3ExternalFileReference):
+    """Stream-asset counterpart to Xspress3ExternalFileReference.
+
+    Declares "STREAM:" as its external asset protocol instead of the
+    legacy "FILESTORE:" and is excluded from Event documents: the
+    corresponding array is delivered out-of-band via the StreamDatum
+    documents emitted by Xspress3HDF5StreamPlugin, not inline event data.
+    """
+
+    def read(self):
+        return {}
+
+    def describe(self):
+        res = super().describe()
+        res[self.name]["external"] = "STREAM:"
+        # Tiled stream nodes add a leading sequence dimension to the per-row shape.
+        res[self.name]["dims"] = ("time", *self.dims)
+        return res
 
 
 class Xspress3HDF5StreamPlugin(HDF5Plugin):
@@ -114,9 +136,6 @@ class Xspress3HDF5StreamPlugin(HDF5Plugin):
             )
             parent_reference.dims = ("channel", *channel_reference.dims)
 
-        for reference in (parent_reference, *channel_references):
-            if reference is not None:
-                reference.external = "STREAM:"
         return parent_reference, channels
 
     def _compose_stream_resource(self, *, full_file_path, reference, channel_number=None):
