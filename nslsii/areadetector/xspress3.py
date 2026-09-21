@@ -890,9 +890,6 @@ def build_channel_class(
     mcaroi_name_re = re.compile(r"mcaroi\d{2}")
 
     # the following functions will become methods of the generated channel class
-    def __init__(self, *args, **kwargs):
-        super(type(self), self).__init__(*args, **kwargs)
-
     def __repr__(self):
         return f"{self.__class__.__name__}(channel_number={self.channel_number}, mcaroi_numbers={self.mcaroi_numbers})"
 
@@ -943,7 +940,6 @@ def build_channel_class(
             return None
 
     channel_fields_and_methods = {
-        "__init__": __init__,
         "__repr__": __repr__,
         # keep the read and configuration attrs defined by the Components
         "_default_read_attrs": None,

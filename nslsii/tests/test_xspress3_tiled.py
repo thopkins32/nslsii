@@ -1,8 +1,7 @@
 import copy
 from collections import Counter
-from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 from urllib.parse import unquote, urlparse
 
 import h5py
@@ -12,7 +11,7 @@ from bluesky import plans
 from bluesky_tiled_plugins import TiledWriter
 from event_model import DocumentNames
 from ophyd import Component, Kind
-from ophyd.areadetector import ADBase, Xspress3Detector
+from ophyd.areadetector import Xspress3Detector
 from ophyd.sim import NullStatus, make_fake_device
 from tiled.catalog import in_memory
 from tiled.client import Context, from_context
@@ -129,11 +128,7 @@ def _build_fake_detector(asset_dir):
         },
     )
     fake_detector_class = make_fake_device(detector_class)
-    with ExitStack() as stack:
-        for channel_name in ("channel01", "channel02"):
-            channel_class = getattr(fake_detector_class, channel_name).cls
-            stack.enter_context(patch.object(channel_class, "__init__", ADBase.__init__))
-        detector = fake_detector_class(prefix="Xsp3:", name="det")
+    detector = fake_detector_class(prefix="Xsp3:", name="det")
 
     _mock_plugin_signals(detector.hdf5plugin)
     _mock_acquisition_completion(detector)
