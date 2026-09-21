@@ -16,13 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class Xspress3StreamExternalFileReference(Xspress3ExternalFileReference):
-    """Stream-asset counterpart to Xspress3ExternalFileReference.
-
-    Declares "STREAM:" as its external asset protocol instead of the
-    legacy "FILESTORE:" and is excluded from Event documents: the
-    corresponding array is delivered out-of-band via the StreamDatum
-    documents emitted by Xspress3HDF5StreamPlugin, not inline event data.
-    """
+    """Stream-asset counterpart to Xspress3ExternalFileReference."""
 
     def read(self):
         return {}
@@ -36,14 +30,7 @@ class Xspress3StreamExternalFileReference(Xspress3ExternalFileReference):
 
 
 class Xspress3HDF5StreamPlugin(HDF5Plugin):
-    """Xspress3 HDF5 plugin that emits native stream asset documents.
-
-    This is the stream-asset counterpart to
-    ``nslsii.areadetector.xspress3.Xspress3HDF5Plugin``. It is intentionally
-    independent of that class rather than a subclass of it: it emits only
-    StreamResource/StreamDatum documents, while the legacy plugin emits only
-    Resource/Datum documents.
-    """
+    """Xspress3 HDF5 plugin that emits stream asset documents."""
 
     root_path = Cpt(Signal, kind=Kind.config)
     path_template = Cpt(Signal, kind=Kind.config)
@@ -222,7 +209,6 @@ class Xspress3HDF5StreamPlugin(HDF5Plugin):
                 indices={"start": frame, "stop": frame + 1}
             )
             self._asset_docs_cache.append(("stream_datum", stream_datum))
-            parent_reference.put(stream_datum["uid"])
 
         for channel in self.parent.iterate_channels():
             channel_reference = channel.get_external_file_ref()
@@ -232,7 +218,6 @@ class Xspress3HDF5StreamPlugin(HDF5Plugin):
                 indices={"start": frame, "stop": frame + 1}
             )
             self._asset_docs_cache.append(("stream_datum", stream_datum))
-            channel_reference.put(stream_datum["uid"])
 
     def collect_asset_docs(self):
         items = list(self._asset_docs_cache)

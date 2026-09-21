@@ -855,7 +855,7 @@ def build_channel_class(
         sequence of all parent classes for the generated channel class,
         by default the only parent is ophyd.areadetector.ADBase
     external_file_reference_class: type, optional
-        the ``Xspress3ExternalFileReference``-compatible class used for the
+        the compatible ``Xspress3ExternalFileReference`` class used for the
         channel's ``image_data_key`` component, default is
         ``Xspress3ExternalFileReference``
 
@@ -1060,12 +1060,12 @@ def build_xspress3_class(
         the default parent is ophyd.areadetector.Xspress3Detector
     extra_class_members: Dict[String, Any]
         a dictionary of extra class members to be passed to the builtin type(...)
+        function; see the builtin type function for allowed key-value pairs
     external_file_reference_class: type, optional
-        the ``Xspress3ExternalFileReference``-compatible class used for the
+        the compatible ``Xspress3ExternalFileReference`` class used for the
         detector's ``image_data_key`` component and every channel's
         ``image_data_key`` component, default is
         ``Xspress3ExternalFileReference``
-        function; see the builtin type function for allowed key-value pairs
 
     Returns
     -------
