@@ -136,41 +136,23 @@ class Xspress3ExternalFileReference(Signal):
     dim_name: str
         name for the first dimension of the array data, default is "bin_count"
 
-    external: str
-        external asset protocol prefix, for example "FILESTORE:" or "STREAM:"
     """
 
-    def __init__(
-        self,
-        *args,
-        dtype_str="<u4",
-        bin_count=4096,
-        dim_name="bin_count",
-        external="FILESTORE:",
-        **kwargs,
-    ):
+    def __init__(self, *args, dtype_str="<u4", bin_count=4096, dim_name="bin_count", **kwargs):
         super().__init__(*args, **kwargs)
-        self.external = external
         self.dtype_str = np.dtype(dtype_str).str
         self.shape = (bin_count,)
         self.dims = (dim_name,)
 
-    def read(self):
-        if self.external == "STREAM:":
-            return {}
-        return super().read()
-
     def describe(self):
-        # Tiled stream nodes add a leading sequence dimension to the per-row shape.
-        dims = ("time", *self.dims) if self.external == "STREAM:" else self.dims
         res = super().describe()
         res[self.name].update(
             dict(
-                external=self.external,
+                external="FILESTORE:",
                 dtype="array",
                 dtype_str=self.dtype_str,
                 shape=self.shape,
-                dims=dims,
+                dims=self.dims,
             )
         )
         return res
