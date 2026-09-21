@@ -135,10 +135,6 @@ class Xspress3ExternalFileReference(Signal):
         number of bins in the array data, default is 4096
     dim_name: str
         name for the first dimension of the array data, default is "bin_count"
-    shape: Sequence[int], optional
-        shape of one data value, default is ``(bin_count,)``
-    dims: Sequence[str], optional
-        names for the dimensions in ``shape``, default is ``(dim_name,)``
 
     external: str
         external asset protocol prefix, for example "FILESTORE:" or "STREAM:"
@@ -150,16 +146,14 @@ class Xspress3ExternalFileReference(Signal):
         dtype_str="<u4",
         bin_count=4096,
         dim_name="bin_count",
-        shape=None,
-        dims=None,
         external="FILESTORE:",
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.external = external
         self.dtype_str = np.dtype(dtype_str).str
-        self.shape = (bin_count,) if shape is None else tuple(shape)
-        self.dims = (dim_name,) if dims is None else tuple(dims)
+        self.shape = (bin_count,)
+        self.dims = (dim_name,)
 
     def read(self):
         if self.external == "STREAM:":
